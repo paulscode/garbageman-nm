@@ -28,7 +28,9 @@ const TOKEN_EXPIRY_MS = 24 * 60 * 60 * 1000; // 24 hours
 // 1. WRAPPER_UI_PASSWORD - provided by wrapper (Start9/Umbrel)
 // 2. WEBUI_PASSWORD - set by user for standalone deployments
 // 3. Generate random password on first start (log to console for standalone)
+
 let UI_PASSWORD = process.env.WRAPPER_UI_PASSWORD || process.env.WEBUI_PASSWORD;
+
 const DEFAULT_PASSWORD = 'garbageman';
 let isDefaultPassword = UI_PASSWORD === DEFAULT_PASSWORD;
 

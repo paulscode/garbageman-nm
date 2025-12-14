@@ -86,7 +86,7 @@ export default function HomePage() {
   const [instances, setInstances] = useState<InstanceDetail[]>([]);
   const [loading, setLoading] = useState(true);
   const [health, setHealth] = useState<'ok' | 'degraded' | 'error'>('ok');
-  const [version, setVersion] = useState<string>('0.1.0'); // API version
+  const [version, setVersion] = useState<string>('0.2.1'); // API version
   const [showNewInstanceModal, setShowNewInstanceModal] = useState(false);
   const [showImportArtifactModal, setShowImportArtifactModal] = useState(false);
   const [showPeerListModal, setShowPeerListModal] = useState(false);

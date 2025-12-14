@@ -797,7 +797,7 @@ const server = http.createServer(async (req, res) => {
       JSON.stringify({
         status: 'ok',
         service: 'multi-daemon-supervisor',
-        version: '0.1.0-stub',
+        version: '0.2.1-stub',
         timestamp: new Date().toISOString(),
       })
     );

@@ -1,0 +1,86 @@
+# ==============================================================================
+# Docker Build Ignore - Garbageman Nodes Manager
+# ==============================================================================
+# Optimize build context by excluding unnecessary files
+# Reduces build time and image size
+
+# Git and version control
+.git/
+.gitignore
+.gitattributes
+.github/ISSUE_TEMPLATE/
+*.md
+!README.md
+
+# Documentation (except root README)
+docs/
+CONTRIBUTING.md
+QUICKSTART.md
+RELEASE_GUIDE.md
+CONSOLIDATION_COMPLETE.md
+
+# Development tools
+devtools/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+.npm
+.eslintcache
+
+# Build artifacts (will be built in Docker)
+webui/ui/.next/
+webui/ui/out/
+webui/api/dist/
+multi-daemon/dist/
+
+# Test files
+*.test.ts
+*.test.js
+*.spec.ts
+*.spec.js
+__tests__/
+coverage/
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+*.bak
+
+# Docker files (don't need in context)
+docker-compose*.yml
+compose*.yml
+.dockerignore
+Dockerfile.dev
+Dockerfile.old
+
+# Seeds (included in webui/api/data)
+seeds/
+
+# Scripts (not needed in image)
+scripts/
+
+# Build output from wrappers
+*.s9pk
+*.deb
+*.rpm
+*.tar.gz

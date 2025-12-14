@@ -1,6 +1,6 @@
 {
   "name": "garbageman-webui-api",
-  "version": "0.1.0",
+  "version": "0.2.1",
   "description": "API server for Garbageman Nodes Manager WebUI",
   "type": "module",
   "scripts": {

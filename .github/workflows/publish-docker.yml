@@ -1,0 +1,152 @@
+name: Build and Publish Docker Images
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'  # Trigger on version tags (e.g., v0.2.1, v1.0.0)
+  workflow_dispatch:  # Allow manual triggering
+    inputs:
+      tag:
+        description: 'Docker image tag (defaults to git tag or branch)'
+        required: false
+        type: string
+      publish:
+        description: 'Publish to registries (true/false)'
+        required: false
+        type: boolean
+        default: true
+
+env:
+  # Default to Docker Hub, but also support GHCR
+  DOCKERHUB_REPO: paulscode/garbageman-nm
+  GHCR_REPO: ghcr.io/paulscode/garbageman-nm
+
+jobs:
+  build-and-push:
+    name: Build and Push Docker Images
+    runs-on: ubuntu-latest
+    
+    permissions:
+      contents: read
+      packages: write  # Required for GHCR
+    
+    strategy:
+      matrix:
+        wrapper:
+          - startos
+          - umbrel
+          - standalone
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Log in to Docker Hub
+        if: ${{ github.event.inputs.publish != 'false' }}
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      
+      - name: Log in to GitHub Container Registry
+        if: ${{ github.event.inputs.publish != 'false' }}
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Extract version from tag or input
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            VERSION="${{ github.event.inputs.tag }}"
+          elif [[ $GITHUB_REF == refs/tags/* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/}
+          else
+            VERSION="dev-$(git rev-parse --short HEAD)"
+          fi
+          
+          # Remove 'v' prefix if present for Docker tags
+          VERSION_NO_V=${VERSION#v}
+          
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "version_no_v=$VERSION_NO_V" >> $GITHUB_OUTPUT
+          echo "Building version: $VERSION"
+      
+      - name: Generate Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ env.DOCKERHUB_REPO }}
+            ${{ env.GHCR_REPO }}
+          tags: |
+            type=semver,pattern={{version}},suffix=-${{ matrix.wrapper }}
+            type=semver,pattern={{major}}.{{minor}},suffix=-${{ matrix.wrapper }}
+            type=semver,pattern={{major}},suffix=-${{ matrix.wrapper }}
+            type=raw,value=latest-${{ matrix.wrapper }},enable={{is_default_branch}}
+            type=raw,value=${{ steps.version.outputs.version_no_v }}-${{ matrix.wrapper }}
+      
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: ${{ github.event.inputs.publish != 'false' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            WRAPPER_TYPE=${{ matrix.wrapper }}
+            VERSION=${{ steps.version.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      
+      - name: Display published tags
+        if: ${{ github.event.inputs.publish != 'false' }}
+        run: |
+          echo "✅ Published Docker images for wrapper: ${{ matrix.wrapper }}"
+          echo ""
+          echo "Docker Hub tags:"
+          echo "${{ steps.meta.outputs.tags }}" | grep "docker.io" || true
+          echo ""
+          echo "GHCR tags:"
+          echo "${{ steps.meta.outputs.tags }}" | grep "ghcr.io" || true
+  
+  summary:
+    name: Build Summary
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+      - name: Build summary
+        run: |
+          echo "# 🎉 Docker Image Build Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Workflow Status" >> $GITHUB_STEP_SUMMARY
+          echo "- **Trigger**: ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Ref**: ${{ github.ref }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **SHA**: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Images Built" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ StartOS wrapper" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Umbrel wrapper" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Standalone wrapper" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Usage" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+          echo "# Docker Hub" >> $GITHUB_STEP_SUMMARY
+          echo "docker pull paulscode/garbageman-nm:latest-umbrel" >> $GITHUB_STEP_SUMMARY
+          echo "docker pull paulscode/garbageman-nm:latest-startos" >> $GITHUB_STEP_SUMMARY
+          echo "docker pull paulscode/garbageman-nm:latest-standalone" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "# GitHub Container Registry" >> $GITHUB_STEP_SUMMARY
+          echo "docker pull ghcr.io/paulscode/garbageman-nm:latest-umbrel" >> $GITHUB_STEP_SUMMARY
+          echo "docker pull ghcr.io/paulscode/garbageman-nm:latest-startos" >> $GITHUB_STEP_SUMMARY
+          echo "docker pull ghcr.io/paulscode/garbageman-nm:latest-standalone" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
