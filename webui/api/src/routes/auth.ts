@@ -29,10 +29,13 @@ const TOKEN_EXPIRY_MS = 24 * 60 * 60 * 1000; // 24 hours
 // 2. WEBUI_PASSWORD - set by user for standalone deployments
 // 3. Generate random password on first start (log to console for standalone)
 let UI_PASSWORD = process.env.WRAPPER_UI_PASSWORD || process.env.WEBUI_PASSWORD;
+const DEFAULT_PASSWORD = 'garbageman';
+let isDefaultPassword = UI_PASSWORD === DEFAULT_PASSWORD;
 
 if (!UI_PASSWORD) {
   // Standalone mode: Generate secure random password
   UI_PASSWORD = crypto.randomBytes(16).toString('base64url');
+  isDefaultPassword = false;
   console.warn('═══════════════════════════════════════════════════════════');
   console.warn('⚠️  NO PASSWORD CONFIGURED - GENERATED RANDOM PASSWORD');
   console.warn('═══════════════════════════════════════════════════════════');
@@ -44,6 +47,21 @@ if (!UI_PASSWORD) {
   console.warn('For wrapper deployments (Start9/Umbrel), use:');
   console.warn('  WRAPPER_UI_PASSWORD=<password_from_wrapper>');
   console.warn('═══════════════════════════════════════════════════════════');
+} else if (isDefaultPassword) {
+  console.warn('═══════════════════════════════════════════════════════════');
+  console.warn('⚠️  DEFAULT PASSWORD DETECTED');
+  console.warn('═══════════════════════════════════════════════════════════');
+  console.warn('Using default password "garbageman"');
+  console.warn('Users will be required to change this on first login.');
+  console.warn('═══════════════════════════════════════════════════════════');
+}
+
+/**
+ * Update the password (used when user changes from default)
+ */
+function updatePassword(newPassword: string): void {
+  UI_PASSWORD = newPassword;
+  isDefaultPassword = false;
 }
 
 /**
@@ -108,7 +126,7 @@ export default async function authRoute(fastify: FastifyInstance) {
   
   fastify.post<{
     Body: { password: string };
-    Reply: { success: boolean; token?: string; message?: string };
+    Reply: { success: boolean; token?: string; message?: string; requiresPasswordChange?: boolean };
   }>(
     '/api/auth/login',
     {
@@ -155,6 +173,7 @@ export default async function authRoute(fastify: FastifyInstance) {
         iat: Date.now(),
         exp: Date.now() + TOKEN_EXPIRY_MS,
         type: 'webui_access',
+        requiresPasswordChange: isDefaultPassword,
       });
       
       fastify.log.info(`Successful login from ${request.ip}`);
@@ -162,6 +181,7 @@ export default async function authRoute(fastify: FastifyInstance) {
       reply.send({
         success: true,
         token,
+        requiresPasswordChange: isDefaultPassword,
       });
     }
   );
@@ -171,7 +191,7 @@ export default async function authRoute(fastify: FastifyInstance) {
   // --------------------------------------------------------------------------
   
   fastify.post<{
-    Reply: { valid: boolean; message?: string };
+    Reply: { valid: boolean; message?: string; requiresPasswordChange?: boolean };
   }>(
     '/api/auth/validate',
     async (request, reply) => {
@@ -187,7 +207,90 @@ export default async function authRoute(fastify: FastifyInstance) {
         return reply.send({ valid: false, message: 'Invalid or expired token' });
       }
       
-      reply.send({ valid: true });
+      reply.send({ 
+        valid: true,
+        requiresPasswordChange: payload.requiresPasswordChange || false,
+      });
+    }
+  );
+  
+  // --------------------------------------------------------------------------
+  // POST /api/auth/change-password - Change password from default
+  // --------------------------------------------------------------------------
+  
+  fastify.post<{
+    Body: { currentPassword: string; newPassword: string };
+    Reply: { success: boolean; token?: string; message?: string };
+  }>(
+    '/api/auth/change-password',
+    {
+      config: {
+        rateLimit: {
+          max: 5, // Only 5 password change attempts per minute
+          timeWindow: '1 minute',
+        },
+      },
+    },
+    async (request, reply) => {
+      const { currentPassword, newPassword } = request.body;
+      
+      if (!currentPassword || !newPassword) {
+        return reply.code(400).send({
+          success: false,
+          message: 'Current password and new password required',
+        });
+      }
+      
+      // Validate new password strength
+      if (newPassword.length < 8) {
+        return reply.code(400).send({
+          success: false,
+          message: 'New password must be at least 8 characters',
+        });
+      }
+      
+      if (newPassword === DEFAULT_PASSWORD) {
+        return reply.code(400).send({
+          success: false,
+          message: 'Cannot use default password',
+        });
+      }
+      
+      // Verify current password
+      const providedBuffer = Buffer.from(currentPassword);
+      const expectedBuffer = Buffer.from(UI_PASSWORD!);
+      
+      const isValid = providedBuffer.length === expectedBuffer.length &&
+        crypto.timingSafeEqual(providedBuffer, expectedBuffer);
+      
+      if (!isValid) {
+        fastify.log.warn(`Failed password change attempt from ${request.ip}`);
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        
+        return reply.code(401).send({
+          success: false,
+          message: 'Current password is incorrect',
+        });
+      }
+      
+      // Update password
+      updatePassword(newPassword);
+      
+      // Generate new token without password change requirement
+      const token = generateToken({
+        iat: Date.now(),
+        exp: Date.now() + TOKEN_EXPIRY_MS,
+        type: 'webui_access',
+        requiresPasswordChange: false,
+      });
+      
+      fastify.log.info(`Password changed successfully from ${request.ip}`);
+      
+      reply.send({
+        success: true,
+        token,
+        message: 'Password changed successfully',
+      });
     }
   );
 }

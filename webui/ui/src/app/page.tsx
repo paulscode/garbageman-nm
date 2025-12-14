@@ -17,6 +17,7 @@ import { Dashboard } from '@/components/Dashboard';
 import { NewInstanceModal, type NewInstanceFormData } from '@/components/NewInstanceModal';
 import { ImportArtifactModal, type ImportArtifactFormData } from '@/components/ImportArtifactModal';
 import { PasswordDialog } from '@/components/PasswordDialog';
+import { PasswordChangeDialog } from '@/components/PasswordChangeDialog';
 import { ToastContainer } from '@/components/Toast';
 import { useToast } from '@/hooks/useToast';
 import { PeerListModal } from '@/components/PeerListModal';
@@ -80,6 +81,8 @@ interface ApiArtifact {
 export default function HomePage() {
   const [isLocked, setIsLocked] = useState(true); // Start locked
   const [isAuthenticating, setIsAuthenticating] = useState(false); // Loading screen during auth
+  const [isCheckingSession, setIsCheckingSession] = useState(true); // Loading screen during session check
+  const [requiresPasswordChange, setRequiresPasswordChange] = useState(false); // Default password detected
   const [instances, setInstances] = useState<InstanceDetail[]>([]);
   const [loading, setLoading] = useState(true);
   const [health, setHealth] = useState<'ok' | 'degraded' | 'error'>('ok');
@@ -140,11 +143,63 @@ export default function HomePage() {
     return response;
   };
   
+  // Check for existing session on mount
+  useEffect(() => {
+    const checkExistingSession = async () => {
+      const token = sessionStorage.getItem('auth_token');
+      
+      if (!token) {
+        // No token, stay locked and stop checking
+        setIsLocked(true);
+        setIsCheckingSession(false);
+        setLoading(false);
+        return;
+      }
+      
+      try {
+        // Validate token with server
+        const response = await fetch(`${API_BASE_URL}/api/auth/validate`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${token}`,
+          },
+        });
+        
+        const data = await response.json();
+        
+        if (data.valid) {
+          // Token is valid, check if password change required
+          if (data.requiresPasswordChange) {
+            setRequiresPasswordChange(true);
+            setIsLocked(false);
+            setIsCheckingSession(false);
+          } else {
+            setIsLocked(false);
+            setIsCheckingSession(false);
+          }
+        } else {
+          // Token invalid, clear and stay locked
+          sessionStorage.removeItem('auth_token');
+          setIsLocked(true);
+          setIsCheckingSession(false);
+        }
+      } catch (error) {
+        console.error('Session validation error:', error);
+        // On error, clear token and stay locked
+        sessionStorage.removeItem('auth_token');
+        setIsLocked(true);
+        setIsCheckingSession(false);
+      }
+    };
+    
+    checkExistingSession();
+  }, []);
+  
   // Load instances on mount
   useEffect(() => {
     const loadInstances = async (showLoading = false) => {
-      // Skip if locked
-      if (isLocked) return;
+      // Skip if locked or password change required
+      if (isLocked || requiresPasswordChange) return;
       
       try {
         if (showLoading) setLoading(true);
@@ -189,13 +244,13 @@ export default function HomePage() {
     const interval = setInterval(() => loadInstances(false), 5000);
     
     return () => clearInterval(interval);
-  }, [isLocked]);
+  }, [isLocked, requiresPasswordChange]);
   
   // Load artifacts on mount
   useEffect(() => {
     const loadArtifacts = async () => {
-      // Skip if locked
-      if (isLocked) return;
+      // Skip if locked or password change required
+      if (isLocked || requiresPasswordChange) return;
       
       try {
         const response = await authenticatedFetch(`${API_BASE_URL}/api/artifacts`);
@@ -225,7 +280,7 @@ export default function HomePage() {
     };
     
     loadArtifacts();
-  }, [isLocked]);
+  }, [isLocked, requiresPasswordChange]);
   
   // Handlers for instance actions
   const handleStart = async (id: string) => {
@@ -888,6 +943,14 @@ export default function HomePage() {
         // Store JWT token in sessionStorage (cleared on browser close)
         sessionStorage.setItem('auth_token', data.token);
         
+        // Check if password change is required
+        if (data.requiresPasswordChange) {
+          setIsLocked(false);
+          setRequiresPasswordChange(true);
+          addToast('warning', 'Password Change Required', 'Please set a new password', { duration: 5000 });
+          return;
+        }
+        
         // Unlock immediately to dismiss password dialog and show loading screen
         setIsLocked(false);
         setIsAuthenticating(true);
@@ -911,21 +974,64 @@ export default function HomePage() {
     }
   };
   
-  // Show loading screen during initial load or authentication
-  if (loading || isAuthenticating) {
+  // Password change handler
+  const handlePasswordChanged = async (newToken: string) => {
+    try {
+      const startTime = Date.now();
+      
+      // Store new JWT token
+      sessionStorage.setItem('auth_token', newToken);
+      
+      // Close password change dialog and show loading screen
+      setRequiresPasswordChange(false);
+      setIsAuthenticating(true);
+      
+      // Ensure loading screen shows for at least 1 second
+      const elapsed = Date.now() - startTime;
+      const minLoadingTime = 1000;
+      const remainingTime = Math.max(0, minLoadingTime - elapsed);
+      
+      await new Promise(resolve => setTimeout(resolve, remainingTime));
+      
+      setIsAuthenticating(false);
+      addToast('success', 'Password Changed', 'Your password has been updated successfully', { duration: 5000 });
+    } catch (error) {
+      console.error('Password change error:', error);
+      addToast('error', 'Error', 'Failed to complete password change', { duration: 5000 });
+    }
+  };
+  
+  // Password change error handler
+  const handlePasswordChangeError = (message: string) => {
+    addToast('error', 'Password Change Failed', message, { duration: 5000 });
+  };
+  
+  // Show loading screen during session check, initial load, or authentication
+  if (isCheckingSession || loading || isAuthenticating) {
     return (
-      <>
-        <PasswordDialog isLocked={isLocked} onUnlock={handleUnlock} />
-        <div className="min-h-screen bg-bg0 flex items-center justify-center">
+      <div className="min-h-screen bg-bg0 flex items-center justify-center">
         <div className="text-center space-y-4">
           <div className="animate-pulse-glow text-accent text-2xl font-mono font-bold">
             LOADING SYSTEMS...
           </div>
           <div className="text-tx3 text-sm font-mono uppercase">
-            Initializing war room interface
+            {isCheckingSession ? 'Validating session' : 'Initializing war room interface'}
           </div>
         </div>
       </div>
+    );
+  }
+  
+  // Show password change dialog if required (before main UI)
+  if (requiresPasswordChange) {
+    return (
+      <>
+        <PasswordChangeDialog
+          isOpen={requiresPasswordChange}
+          onPasswordChanged={handlePasswordChanged}
+          onError={handlePasswordChangeError}
+        />
+        <ToastContainer toasts={toasts} onDismiss={dismissToast} />
       </>
     );
   }

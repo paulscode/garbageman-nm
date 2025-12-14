@@ -146,26 +146,50 @@ export function NodeCard({
             </button>
           </div>
         </div>
-        <div className="flex justify-between items-center group">
-          <span className="text-tx3">P2P:</span>
-          <div className="flex items-center gap-2">
-            <span className="text-tx0">:{status.p2pPort}</span>
-            <button
-              onClick={() => handleCopy(`:${status.p2pPort}`, 'p2p')}
-              className="opacity-40 hover:opacity-100 transition-opacity"
-              title="Copy to clipboard"
-            >
-              {copiedField === 'p2p' ? (
-                <span className="text-acc-orange">✓</span>
-              ) : (
-                <svg className="w-3 h-3 text-tx0" fill="none" viewBox="0 0 16 16" stroke="currentColor" strokeWidth="2">
-                  <rect x="5" y="5" width="9" height="9" rx="1" />
-                  <path d="M3 11V3a2 2 0 0 1 2-2h8" />
-                </svg>
-              )}
-            </button>
+        {status.ipv4Enabled && (
+          <div className="flex justify-between items-center group">
+            <span className="text-tx3">Local P2P Port:</span>
+            <div className="flex items-center gap-2">
+              <span className="text-tx0">{status.p2pPort}</span>
+              <button
+                onClick={() => handleCopy(`${status.p2pPort}`, 'p2p')}
+                className="opacity-40 hover:opacity-100 transition-opacity"
+                title="Copy to clipboard"
+              >
+                {copiedField === 'p2p' ? (
+                  <span className="text-acc-orange">✓</span>
+                ) : (
+                  <svg className="w-3 h-3 text-tx0" fill="none" viewBox="0 0 16 16" stroke="currentColor" strokeWidth="2">
+                    <rect x="5" y="5" width="9" height="9" rx="1" />
+                    <path d="M3 11V3a2 2 0 0 1 2-2h8" />
+                  </svg>
+                )}
+              </button>
+            </div>
           </div>
-        </div>
+        )}
+        {status.onion && (
+          <div className="flex justify-between items-center group">
+            <span className="text-tx3">Tor P2P Port:</span>
+            <div className="flex items-center gap-2">
+              <span className="text-tx0">8333</span>
+              <button
+                onClick={() => handleCopy('8333', 'p2p-tor')}
+                className="opacity-40 hover:opacity-100 transition-opacity"
+                title="Copy to clipboard"
+              >
+                {copiedField === 'p2p-tor' ? (
+                  <span className="text-acc-orange">✓</span>
+                ) : (
+                  <svg className="w-3 h-3 text-tx0" fill="none" viewBox="0 0 16 16" stroke="currentColor" strokeWidth="2">
+                    <rect x="5" y="5" width="9" height="9" rx="1" />
+                    <path d="M3 11V3a2 2 0 0 1 2-2h8" />
+                  </svg>
+                )}
+              </button>
+            </div>
+          </div>
+        )}
         {status.onion && (
           <div className="flex justify-between items-center group">
             <span className="text-tx3">Onion:</span>

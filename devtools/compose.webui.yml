@@ -78,6 +78,7 @@ services:
       HOST: "0.0.0.0"
       ENVFILES_DIR: /envfiles
       SUPERVISOR_URL: http://multi-daemon:9000
+      DATA_DIR: /data/bitcoin
       LOG_LEVEL: info
       # Set to 'production' to disable test data endpoints for security
       NODE_ENV: development

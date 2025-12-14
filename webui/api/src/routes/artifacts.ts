@@ -279,14 +279,21 @@ export default async function artifactsRoute(fastify: FastifyInstance) {
       try {
         fastify.log.info(`Starting artifact import for release: ${tag}`);
         
-        // Check if import is already in progress
+        // Check if import is already in progress (exclude error/complete states)
         const existingProgress = importProgressMap.get(tag);
-        if (existingProgress && (existingProgress.status === 'downloading' || existingProgress.status === 'reassembling')) {
+        if (existingProgress && 
+            (existingProgress.status === 'downloading' || existingProgress.status === 'reassembling' || existingProgress.status === 'processing')) {
           return reply.code(409).send({
             success: false,
             message: `Import already in progress for ${tag}`,
             alreadyExists: false,
           });
+        }
+        
+        // Clear any stale error/complete entries to allow retry
+        if (existingProgress && (existingProgress.status === 'error' || existingProgress.status === 'complete')) {
+          fastify.log.info(`Clearing stale import state for ${tag} (status: ${existingProgress.status})`);
+          importProgressMap.delete(tag);
         }
         
         // Check if artifact already exists
