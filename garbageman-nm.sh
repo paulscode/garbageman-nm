@@ -2,7 +2,8 @@
 ################################################################################
 # garbageman-nm.sh — All-in-one TUI for Garbageman lifecycle management
 #                     Supports both VMs and Containers
-#                     Tested on Linux Mint 22.2 (Ubuntu 24.04 base)
+#                     Tested on Linux Mint 22.2 (Ubuntu 24.04 base) and Raspberry Pi 5
+#                     Multi-architecture: x86_64 and ARM64 (aarch64)
 #
 # Purpose:
 #   Automate the creation and management of Bitcoin Garbageman nodes running
@@ -27,6 +28,13 @@
 #   - Import/export for easy transfer between hosts
 #
 # Architecture Notes:
+#   Multi-Architecture Support:
+#     - Automatically detects host architecture (x86_64 or ARM64/aarch64)
+#     - Downloads correct Alpine Linux images for the detected architecture
+#     - Export/import includes architecture metadata for compatibility checking
+#     - Export folder names include architecture: gm-export-{arch}-{timestamp}
+#     - Warns users when importing artifacts from mismatched architectures
+#   
 #   VM Mode:
 #     - Host uses glibc (Ubuntu/Mint), VMs use musl (Alpine) - binaries are NOT compatible
 #     - Solution: Build Garbageman INSIDE Alpine using virt-customize
@@ -89,9 +97,30 @@ BITCOIN_GROUP="${BITCOIN_GROUP:-bitcoin}"
 BITCOIN_DATADIR="${BITCOIN_DATADIR:-/var/lib/bitcoin}"   # Blockchain data location
 TOR_GROUP="${TOR_GROUP:-tor}"                            # Tor daemon group
 
+# Detect host architecture (x86_64 or aarch64/arm64)
+# This determines:
+#   - Which Alpine ISO/minirootfs to download (x86_64 or aarch64)
+#   - Which QEMU binary to use (qemu-system-x86_64 or qemu-system-aarch64)
+#   - Export file naming (x86_64 = no suffix, aarch64 = -aarch64 suffix for compatibility)
+HOST_ARCH="$(uname -m)"
+case "$HOST_ARCH" in
+  x86_64)
+    ALPINE_ARCH="x86_64"
+    ;;
+  aarch64|arm64)
+    ALPINE_ARCH="aarch64"
+    HOST_ARCH="aarch64"  # Normalize arm64 to aarch64
+    ;;
+  *)
+    echo "⚠️  Warning: Unsupported architecture '$HOST_ARCH', defaulting to x86_64"
+    ALPINE_ARCH="x86_64"
+    HOST_ARCH="x86_64"
+    ;;
+esac
+
 # Alpine Linux "virt" ISO mirror (we automatically pick latest-stable)
 # The "virt" flavor is optimized for VMs (smaller kernel, no desktop packages)
-ALPINE_MIRROR="${ALPINE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/x86_64}"
+ALPINE_MIRROR="${ALPINE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/${ALPINE_ARCH}}"
 
 # SSH access for monitoring (a temporary key is injected into the guest for RPC polling)
 SSH_USER="${SSH_USER:-root}"                             # User for SSH connection
@@ -475,17 +504,32 @@ install_docker() {
 #   - Runs apt-get update and install (requires sudo)
 #   - Enables and starts libvirtd service
 #   - Adds current user to libvirt group (may require logout to take effect)
+# Note: Handles OS differences (Ubuntu vs Debian/Raspberry Pi OS) and architecture (x86_64 vs ARM64)
 install_deps() {
   echo "Installing required packages (requires sudo)..."
   sudo apt-get update
-  sudo apt-get install -y software-properties-common
-  sudo add-apt-repository -y universe
-  sudo apt-get update
+  
+  # Ubuntu-specific: add universe repository for additional packages
+  # Skip on Debian-based systems like Raspberry Pi OS (causes errors)
+  if grep -qi "ubuntu" /etc/os-release 2>/dev/null; then
+    sudo apt-get install -y software-properties-common
+    sudo add-apt-repository -y universe
+    sudo apt-get update
+  fi
+  
+  # Architecture-specific QEMU packages:
+  # - x86_64: qemu-kvm (full KVM support)
+  # - aarch64: qemu-system-arm (includes aarch64 VM support)
+  local qemu_pkg="qemu-kvm"
+  if [[ "$HOST_ARCH" == "aarch64" ]]; then
+    qemu_pkg="qemu-system-arm"
+  fi
+  
   sudo apt-get install -y \
     git build-essential cmake pkg-config libevent-dev \
     libboost-system-dev libboost-filesystem-dev libboost-thread-dev libsqlite3-dev \
     libzmq3-dev \
-    qemu-kvm libvirt-daemon-system libvirt-clients virtinst virt-manager \
+    ${qemu_pkg} libvirt-daemon-system libvirt-clients virtinst \
     libguestfs-tools xorriso curl jq openssh-client dialog whiptail
   sudo systemctl enable --now libvirtd
   
@@ -672,13 +716,16 @@ detect_host_resources(){
   (( AVAIL_DISK_GB < 0 )) && AVAIL_DISK_GB=0
 
   # Initial sync suggestion: use ALL available resources for fast IBD
-  # (clamped to sensible minimums)
+  # Clamped to sensible ranges:
+  #   CPUs: minimum 1, maximum = available cores after reserves
+  #   RAM: minimum 2048 MiB (2GB needed for Bitcoin IBD), maximum = available RAM after reserves
   local svcpus="$AVAIL_CORES"
   (( svcpus < 1 )) && svcpus=1
   HOST_SUGGEST_SYNC_VCPUS="$svcpus"
 
   local sram="$AVAIL_RAM_MB"
   (( sram < 2048 )) && sram=2048   # Minimum 2GB for IBD
+  (( sram > AVAIL_RAM_MB )) && sram=$AVAIL_RAM_MB  # Don't suggest more than available
   HOST_SUGGEST_SYNC_RAM_MB="$sram"
 
   # Post-sync simultaneous capacity (base + clones) given runtime VM sizes
@@ -785,6 +832,7 @@ detect_host_resources_container(){
 
   local sram="$AVAIL_RAM_MB"
   (( sram < 2048 )) && sram=2048   # Minimum 2GB for IBD
+  (( sram > AVAIL_RAM_MB )) && sram=$AVAIL_RAM_MB  # Cap at available RAM
   HOST_SUGGEST_SYNC_RAM_MB="$sram"
 
   # Post-sync simultaneous capacity (base + clones) given runtime container sizes
@@ -1402,7 +1450,7 @@ select_latest_alpine_iso(){
   local tmpd="$1"
   local iso
   # Scrape the mirror directory listing to find the latest virt ISO
-  iso="$(curl -fsSL "$ALPINE_MIRROR/" | grep -oE 'alpine-virt-[0-9.]+-x86_64\.iso' | sort -V | tail -n1)"
+  iso="$(curl -fsSL "$ALPINE_MIRROR/" | grep -oE "alpine-virt-[0-9.]+-${ALPINE_ARCH}\.iso" | sort -V | tail -n1)"
   [[ -n "$iso" ]] || die "Could not resolve latest alpine-virt ISO at $ALPINE_MIRROR"
   curl -fLo "$tmpd/alpine-virt.iso" "$ALPINE_MIRROR/$iso"
   echo "$tmpd/alpine-virt.iso"
@@ -1822,11 +1870,11 @@ create_alpine_image_alternative(){
   # Download Alpine mini root filesystem
   echo "Downloading Alpine mini root filesystem..."
   local alpine_version="3.18.4"
-  local alpine_url="https://dl-cdn.alpinelinux.org/alpine/v3.18/releases/x86_64/alpine-minirootfs-${alpine_version}-x86_64.tar.gz"
+  local alpine_url="https://dl-cdn.alpinelinux.org/alpine/v3.18/releases/${ALPINE_ARCH}/alpine-minirootfs-${alpine_version}-${ALPINE_ARCH}.tar.gz"
   
   if ! curl -fsSL "$alpine_url" -o "$tmpd/alpine-mini.tar.gz"; then
     echo "Failed to download Alpine ${alpine_version}, trying latest..."
-    if ! curl -fsSL "https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/x86_64/alpine-minirootfs-3.20.3-x86_64.tar.gz" \
+    if ! curl -fsSL "https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/${ALPINE_ARCH}/alpine-minirootfs-3.20.3-${ALPINE_ARCH}.tar.gz" \
       -o "$tmpd/alpine-mini.tar.gz"; then
       rm -rf "$tmpd"
       echo "❌ Failed to download Alpine mini root filesystem"
@@ -1843,7 +1891,7 @@ create_alpine_image_alternative(){
   
   # Download Alpine kernel and initramfs separately (no network needed during install)
   echo "Downloading Alpine kernel components..."
-  local kernel_base="https://dl-cdn.alpinelinux.org/alpine/v3.18/releases/x86_64"
+  local kernel_base="https://dl-cdn.alpinelinux.org/alpine/v3.18/releases/${ALPINE_ARCH}"
   if ! curl -fsSL "${kernel_base}/linux-virt-6.1.55-r0.apk" -o "$tmpd/linux-virt.apk" 2>/dev/null; then
     echo "Kernel download failed, will install via network later..."
   fi
@@ -2433,9 +2481,18 @@ import_base_vm(){
   echo "Verifying SHA256 checksums..."
   
   # Verify VM image archive checksum from SHA256SUMS
-  local vm_archive=$(ls "$item_path"/vm-image.tar.gz 2>/dev/null | head -n1)
+  # On ARM64: look for -aarch64 suffix first, then fall back to generic
+  # On x86_64: use generic name (no suffix for backwards compatibility)
+  local vm_archive=""
+  if [[ "$HOST_ARCH" == "aarch64" ]]; then
+    vm_archive=$(ls "$item_path"/vm-image-aarch64.tar.gz 2>/dev/null | head -n1)
+  fi
   if [[ -z "$vm_archive" ]]; then
-    pause "❌ VM image archive not found: vm-image.tar.gz\n\nThis export may only contain a container image."
+    # Fallback to generic name (works for x86_64 and old exports)
+    vm_archive=$(ls "$item_path"/vm-image.tar.gz 2>/dev/null | head -n1)
+  fi
+  if [[ -z "$vm_archive" ]]; then
+    pause "❌ VM image archive not found: vm-image.tar.gz (or vm-image-aarch64.tar.gz on ARM)\n\nThis export may only contain a container image."
     return
   fi
   local vm_basename=$(basename "$vm_archive")
@@ -2447,6 +2504,54 @@ import_base_vm(){
   
   echo "✅ Checksum verified successfully"
   
+  # Check architecture compatibility
+  echo ""
+  echo "Checking architecture compatibility..."
+  local export_arch="unknown"
+  
+  # Try to read architecture from METADATA.txt
+  if [[ -f "$item_path/METADATA.txt" ]]; then
+    export_arch=$(grep "^Architecture:" "$item_path/METADATA.txt" 2>/dev/null | cut -d' ' -f2 | tr -d '\r\n')
+  fi
+  
+  # If not found, try MANIFEST.txt
+  if [[ -z "$export_arch" || "$export_arch" == "unknown" ]]; then
+    if [[ -f "$item_path/MANIFEST.txt" ]]; then
+      export_arch=$(grep "^Architecture:" "$item_path/MANIFEST.txt" 2>/dev/null | cut -d' ' -f2 | tr -d '\r\n')
+    fi
+  fi
+  
+  # If still not found, try to infer from folder name (gm-export-ARCH-TIMESTAMP)
+  if [[ -z "$export_arch" || "$export_arch" == "unknown" ]]; then
+    if [[ "$selected_basename" =~ gm-export-(x86_64|aarch64)- ]]; then
+      export_arch="${BASH_REMATCH[1]}"
+    fi
+  fi
+  
+  if [[ -n "$export_arch" && "$export_arch" != "unknown" ]]; then
+    echo "  Export architecture: $export_arch"
+    echo "  Host architecture: $HOST_ARCH"
+    
+    if [[ "$export_arch" != "$HOST_ARCH" ]]; then
+      echo ""
+      echo "⚠️  WARNING: Architecture mismatch detected!"
+      echo ""
+      if ! whiptail --title "Architecture Mismatch" --yesno \
+        "⚠️  ARCHITECTURE MISMATCH DETECTED!\n\nExport Architecture: $export_arch\nHost Architecture: $HOST_ARCH\n\nThe exported artifacts were built for a different architecture.\nThey will NOT work on this system.\n\nYou need to:\n• Export from a $HOST_ARCH system, OR\n• Import this $export_arch export on a $export_arch system\n\nDo you want to cancel the import?" \
+        20 78; then
+        echo "Import cancelled by user."
+        return
+      else
+        echo "⚠️  Proceeding with import despite architecture mismatch (will likely fail)"
+      fi
+    else
+      echo "  ✅ Architecture matches host"
+    fi
+  else
+    echo "  ⚠️  Warning: Could not determine export architecture"
+    echo "     (This may be an older export without architecture metadata)"
+  fi
+  
   # Let user select node type (Garbageman or Bitcoin Knots)
   echo ""
   echo "Checking available node implementations..."
@@ -2457,12 +2562,23 @@ import_base_vm(){
   local has_knots=false
   
   # Check which binaries are available in the export
-  if [[ -f "$item_path/bitcoind-gm" ]] && [[ -f "$item_path/bitcoin-cli-gm" ]]; then
+  # On ARM64: prefer -aarch64 suffix, fall back to generic
+  # On x86_64: use generic names (no suffix for backwards compatibility)
+  
+  # Check for Garbageman binaries
+  if [[ "$HOST_ARCH" == "aarch64" ]] && [[ -f "$item_path/bitcoind-gm-aarch64" ]] && [[ -f "$item_path/bitcoin-cli-gm-aarch64" ]]; then
+    has_gm=true
+    echo "  ✓ Found Garbageman binaries (bitcoind-gm-aarch64, bitcoin-cli-gm-aarch64)"
+  elif [[ -f "$item_path/bitcoind-gm" ]] && [[ -f "$item_path/bitcoin-cli-gm" ]]; then
     has_gm=true
     echo "  ✓ Found Garbageman binaries (bitcoind-gm, bitcoin-cli-gm)"
   fi
   
-  if [[ -f "$item_path/bitcoind-knots" ]] && [[ -f "$item_path/bitcoin-cli-knots" ]]; then
+  # Check for Bitcoin Knots binaries
+  if [[ "$HOST_ARCH" == "aarch64" ]] && [[ -f "$item_path/bitcoind-knots-aarch64" ]] && [[ -f "$item_path/bitcoin-cli-knots-aarch64" ]]; then
+    has_knots=true
+    echo "  ✓ Found Bitcoin Knots binaries (bitcoind-knots-aarch64, bitcoin-cli-knots-aarch64)"
+  elif [[ -f "$item_path/bitcoind-knots" ]] && [[ -f "$item_path/bitcoin-cli-knots" ]]; then
     has_knots=true
     echo "  ✓ Found Bitcoin Knots binaries (bitcoind-knots, bitcoin-cli-knots)"
   fi
@@ -2668,8 +2784,20 @@ import_base_vm(){
   echo ""
   echo "[3.5/7] Installing ${binary_suffix#-} binaries..."
   
+  # On ARM64: prefer -aarch64 suffix, fall back to generic
+  # On x86_64: use generic names (no suffix)
   local src_bitcoind="$item_path/bitcoind${binary_suffix}"
   local src_bitcoin_cli="$item_path/bitcoin-cli${binary_suffix}"
+  
+  if [[ "$HOST_ARCH" == "aarch64" ]]; then
+    # Try aarch64-specific first
+    if [[ -f "$item_path/bitcoind${binary_suffix}-aarch64" ]]; then
+      src_bitcoind="$item_path/bitcoind${binary_suffix}-aarch64"
+    fi
+    if [[ -f "$item_path/bitcoin-cli${binary_suffix}-aarch64" ]]; then
+      src_bitcoin_cli="$item_path/bitcoin-cli${binary_suffix}-aarch64"
+    fi
+  fi
   
   # Create temporary directory for binaries
   local temp_bin_dir="$HOME/.cache/gm-bin-temp-$$"
@@ -3049,11 +3177,16 @@ torcontrol=127.0.0.1:9051
 
 # import_from_github: Import base VM from GitHub release (NEW MODULAR FORMAT)
 # Purpose: Download and import pre-built VM using modular architecture
+# NOTE: When publishing releases, ensure architecture-specific exports are used:
+#       - x86_64: gm-export-x86_64-YYYYMMDD-HHMMSS
+#       - aarch64: gm-export-aarch64-YYYYMMDD-HHMMSS
+#       The script will validate architecture compatibility during import.
 # Modular Design:
 #   - Downloads blockchain data separately from images
 #   - Downloads BOTH images (VM + container) for flexibility/switching later
 #   - Downloads node binaries (Garbageman and/or Bitcoin Knots)
 #   - Verifies checksums (unified SHA256SUMS when available)
+#   - Verifies architecture compatibility with host system
 #   - Reassembles blockchain from split parts
 #   - Uses VM image for import; keeps container image for later use
 # Flow:
@@ -3203,22 +3336,36 @@ import_from_github(){
     # Unified checksum file
     elif [[ "$name" == "SHA256SUMS" ]]; then
       sha256sums_url="$url"
-    # VM image (vm-image.tar.gz)
-    elif [[ "$name" == "vm-image.tar.gz" ]]; then
+    # VM image (ARM64: prefer -aarch64 suffix, x86_64: generic name)
+    elif [[ "$HOST_ARCH" == "aarch64" && "$name" == "vm-image-aarch64.tar.gz" ]]; then
       vm_image_name="$name"
       vm_image_url="$url"
-    # Container image (container-image.tar.gz)
-    elif [[ "$name" == "container-image.tar.gz" ]]; then
+    elif [[ "$name" == "vm-image.tar.gz" && -z "$vm_image_url" ]]; then
+      vm_image_name="$name"
+      vm_image_url="$url"
+    # Container image (ARM64: prefer -aarch64 suffix, x86_64: generic name)
+    elif [[ "$HOST_ARCH" == "aarch64" && "$name" == "container-image-aarch64.tar.gz" ]]; then
       container_image_name="$name"
       container_image_url="$url"
-    # Binary files
-    elif [[ "$name" == "bitcoind-gm" ]]; then
+    elif [[ "$name" == "container-image.tar.gz" && -z "$container_image_url" ]]; then
+      container_image_name="$name"
+      container_image_url="$url"
+    # Binary files (ARM64: prefer -aarch64 suffix, x86_64: generic names)
+    elif [[ "$HOST_ARCH" == "aarch64" && "$name" == "bitcoind-gm-aarch64" ]]; then
       bitcoind_gm_url="$url"
-    elif [[ "$name" == "bitcoin-cli-gm" ]]; then
+    elif [[ "$name" == "bitcoind-gm" && -z "$bitcoind_gm_url" ]]; then
+      bitcoind_gm_url="$url"
+    elif [[ "$HOST_ARCH" == "aarch64" && "$name" == "bitcoin-cli-gm-aarch64" ]]; then
       bitcoin_cli_gm_url="$url"
-    elif [[ "$name" == "bitcoind-knots" ]]; then
+    elif [[ "$name" == "bitcoin-cli-gm" && -z "$bitcoin_cli_gm_url" ]]; then
+      bitcoin_cli_gm_url="$url"
+    elif [[ "$HOST_ARCH" == "aarch64" && "$name" == "bitcoind-knots-aarch64" ]]; then
       bitcoind_knots_url="$url"
-    elif [[ "$name" == "bitcoin-cli-knots" ]]; then
+    elif [[ "$name" == "bitcoind-knots" && -z "$bitcoind_knots_url" ]]; then
+      bitcoind_knots_url="$url"
+    elif [[ "$HOST_ARCH" == "aarch64" && "$name" == "bitcoin-cli-knots-aarch64" ]]; then
+      bitcoin_cli_knots_url="$url"
+    elif [[ "$name" == "bitcoin-cli-knots" && -z "$bitcoin_cli_knots_url" ]]; then
       bitcoin_cli_knots_url="$url"
     fi
   done < <(echo "$release_assets" | jq -r '.[] | "\(.name)|\(.browser_download_url)"')
@@ -3834,7 +3981,7 @@ create_base_vm_from_scratch(){
     echo "Selected: Garbageman (Libre Relay)"
   elif [[ "$node_choice" == "2" ]]; then
     GM_REPO="https://github.com/bitcoinknots/bitcoin.git"
-    GM_BRANCH="v29.2.knots20251010"
+    GM_BRANCH="v29.2.knots20251110"
     GM_IS_TAG="true"
     echo "Selected: Bitcoin Knots"
   else
@@ -5181,10 +5328,10 @@ Proceed with export?" 26 78; then
     return
   fi
   
-  # Generate export name with timestamp
+  # Generate export name with timestamp and architecture
   local export_timestamp
   export_timestamp=$(date +%Y%m%d-%H%M%S)
-  local export_name="gm-export-${export_timestamp}"
+  local export_name="gm-export-${HOST_ARCH}-${export_timestamp}"
   local export_dir="$HOME/Downloads/${export_name}"
   local temp_clone="${VM_NAME}-export-temp"
   
@@ -5302,6 +5449,7 @@ Blockchain Data Export (SANITIZED)
 
 Export Date: $(date -u +%Y-%m-%dT%H:%M:%SZ)
 Export Timestamp: $export_timestamp
+Architecture: $HOST_ARCH
 Source: $VM_NAME (VM)
 Block Height: $blockchain_height
 
@@ -5372,21 +5520,29 @@ EOF
     
     # Use virt-copy-out to extract binaries
     if sudo virt-copy-out -a "$vm_disk" /usr/local/bin/bitcoind /usr/local/bin/bitcoin-cli "$temp_binaries/" 2>/dev/null; then
+      # Only add architecture suffix for non-x86_64 platforms (backwards compatibility)
+      local bitcoind_name="bitcoind${binary_suffix}"
+      local bitcoin_cli_name="bitcoin-cli${binary_suffix}"
+      if [[ "$HOST_ARCH" != "x86_64" ]]; then
+        bitcoind_name="bitcoind${binary_suffix}-${HOST_ARCH}"
+        bitcoin_cli_name="bitcoin-cli${binary_suffix}-${HOST_ARCH}"
+      fi
+      
       # Rename and move to export directory
-      mv "$temp_binaries/bitcoind" "$export_dir/bitcoind${binary_suffix}" 2>/dev/null || true
-      mv "$temp_binaries/bitcoin-cli" "$export_dir/bitcoin-cli${binary_suffix}" 2>/dev/null || true
+      mv "$temp_binaries/bitcoind" "$export_dir/${bitcoind_name}" 2>/dev/null || true
+      mv "$temp_binaries/bitcoin-cli" "$export_dir/${bitcoin_cli_name}" 2>/dev/null || true
       
       # Fix ownership (virt-copy-out runs as root)
-      sudo chown "$USER:$USER" "$export_dir/bitcoind${binary_suffix}" 2>/dev/null || true
-      sudo chown "$USER:$USER" "$export_dir/bitcoin-cli${binary_suffix}" 2>/dev/null || true
+      sudo chown "$USER:$USER" "$export_dir/${bitcoind_name}" 2>/dev/null || true
+      sudo chown "$USER:$USER" "$export_dir/${bitcoin_cli_name}" 2>/dev/null || true
       
       # Clean up temp directory
       rm -rf "$temp_binaries"
       
       # Generate checksums for binaries
-      if [[ -f "$export_dir/bitcoind${binary_suffix}" ]] && [[ -f "$export_dir/bitcoin-cli${binary_suffix}" ]]; then
-        (cd "$export_dir" && sha256sum "bitcoind${binary_suffix}" "bitcoin-cli${binary_suffix}" >> SHA256SUMS.binaries)
-        echo "    ✓ Binaries exported as: bitcoind${binary_suffix}, bitcoin-cli${binary_suffix}"
+      if [[ -f "$export_dir/${bitcoind_name}" ]] && [[ -f "$export_dir/${bitcoin_cli_name}" ]]; then
+        (cd "$export_dir" && sha256sum "${bitcoind_name}" "${bitcoin_cli_name}" >> SHA256SUMS.binaries)
+        echo "    ✓ Binaries exported as: ${bitcoind_name}, ${bitcoin_cli_name}"
         echo "    ✓ Binary checksums saved to SHA256SUMS.binaries"
       else
         echo "    ⚠️  Warning: Failed to rename binaries"
@@ -5681,6 +5837,7 @@ Export Information
 
 Export Date: $(date -u +%Y-%m-%dT%H:%M:%SZ)
 Export Timestamp: $export_timestamp
+Architecture: $HOST_ARCH
 Format: Modular (VM image + blockchain parts)
 
 VM Specifications:
@@ -5729,7 +5886,11 @@ METADATA
   # Step 7: Create VM image archive within export folder
   echo ""
   echo "[6/7] Creating VM image archive..."
+  # Only add architecture suffix for non-x86_64 platforms (backwards compatibility)
   local vm_archive_name="vm-image.tar.gz"
+  if [[ "$HOST_ARCH" != "x86_64" ]]; then
+    vm_archive_name="vm-image-${HOST_ARCH}.tar.gz"
+  fi
   local vm_archive_path="$export_dir/${vm_archive_name}"
   
   # Archive the VM files (excluding blockchain parts and manifest)
@@ -6431,7 +6592,7 @@ create_base_container_from_scratch(){
     echo "Selected: Garbageman (Libre Relay)"
   elif [[ "$node_choice" == "2" ]]; then
     GM_REPO="https://github.com/bitcoinknots/bitcoin.git"
-    GM_BRANCH="v29.2.knots20251010"
+    GM_BRANCH="v29.2.knots20251110"
     GM_IS_TAG="true"
     echo "Selected: Bitcoin Knots"
   else
@@ -7019,35 +7180,40 @@ monitor_container_sync(){
     echo "Container '$CONTAINER_NAME' is already running."
     echo ""
     
-    # Get current container resource limits
+    # Detect host resources first to populate AVAIL_CORES and AVAIL_RAM_MB
+    # These are used as defaults when container has unlimited resources
+    detect_host_resources_container
+    
+    # Get current container resource limits from runtime
+    # Note: "0" or empty means unlimited - we'll use AVAIL_* values as sensible defaults
     local current_cpus current_ram_mb
     local runtime=$(container_runtime)
     
     if [[ "$runtime" == "docker" ]]; then
-      # Docker inspect returns CPUs as string like "2.000000"
+      # Docker stores CPUs as nanocpus (1 CPU = 1000000000 nanocpus)
       current_cpus=$(docker inspect --format='{{.HostConfig.NanoCpus}}' "$CONTAINER_NAME" 2>/dev/null || echo "0")
       if [[ "$current_cpus" == "0" ]]; then
-        # No limit set, use system default (all cores)
-        current_cpus="$HOST_CORES"
+        # Unlimited CPUs - default to available cores after reserves
+        current_cpus="$AVAIL_CORES"
       else
-        # Convert nanocpus to whole CPUs (1 CPU = 1000000000 nanocpus)
+        # Convert nanocpus to whole CPUs
         current_cpus=$((current_cpus / 1000000000))
       fi
       
-      # Docker memory is in bytes
+      # Docker stores memory in bytes
       local mem_bytes
       mem_bytes=$(docker inspect --format='{{.HostConfig.Memory}}' "$CONTAINER_NAME" 2>/dev/null || echo "0")
       if [[ "$mem_bytes" == "0" ]]; then
-        # No limit set, use system default
-        current_ram_mb="$HOST_RAM_MB"
+        # Unlimited memory - default to available RAM after reserves (not total system RAM)
+        current_ram_mb="$AVAIL_RAM_MB"
       else
         current_ram_mb=$((mem_bytes / 1024 / 1024))
       fi
     else
-      # Podman
+      # Podman uses same format as Docker
       current_cpus=$(podman inspect --format='{{.HostConfig.NanoCpus}}' "$CONTAINER_NAME" 2>/dev/null || echo "0")
       if [[ "$current_cpus" == "0" ]]; then
-        current_cpus="$HOST_CORES"
+        current_cpus="$AVAIL_CORES"
       else
         current_cpus=$((current_cpus / 1000000000))
       fi
@@ -7055,13 +7221,11 @@ monitor_container_sync(){
       local mem_bytes
       mem_bytes=$(podman inspect --format='{{.HostConfig.Memory}}' "$CONTAINER_NAME" 2>/dev/null || echo "0")
       if [[ "$mem_bytes" == "0" ]]; then
-        current_ram_mb="$HOST_RAM_MB"
+        current_ram_mb="$AVAIL_RAM_MB"
       else
         current_ram_mb=$((mem_bytes / 1024 / 1024))
       fi
     fi
-
-    detect_host_resources_container
 
     # Prompt user to confirm or change resources
     local banner="Host: ${HOST_CORES} cores, ${HOST_RAM_MB} MiB
@@ -8262,10 +8426,10 @@ export_base_container(){
     die "Container '$CONTAINER_NAME' not found."
   fi
   
-  # Generate export name with timestamp
+  # Generate export name with timestamp and architecture
   local export_timestamp
   export_timestamp=$(date +%Y%m%d-%H%M%S)
-  local export_name="gm-export-${export_timestamp}"
+  local export_name="gm-export-${HOST_ARCH}-${export_timestamp}"
   local export_dir="$HOME/Downloads/${export_name}"
   
   # Create export directory (flat structure, no subdirectories)
@@ -8461,6 +8625,7 @@ Blockchain Data Export (SANITIZED)
 
 Export Date: $(date -u +%Y-%m-%dT%H:%M:%SZ)
 Export Timestamp: $export_timestamp
+Architecture: $HOST_ARCH
 Source: $CONTAINER_NAME (Container)
 Block Height: $blocks
 
@@ -8538,16 +8703,24 @@ EOF
     fi
     
     # Copy binaries from container to export directory
-    if container_cmd cp "$CONTAINER_NAME:/usr/local/bin/bitcoind" "$export_dir/bitcoind${binary_suffix}" 2>/dev/null && \
-       container_cmd cp "$CONTAINER_NAME:/usr/local/bin/bitcoin-cli" "$export_dir/bitcoin-cli${binary_suffix}" 2>/dev/null; then
+    # Only add architecture suffix for non-x86_64 platforms (backwards compatibility)
+    local bitcoind_name="bitcoind${binary_suffix}"
+    local bitcoin_cli_name="bitcoin-cli${binary_suffix}"
+    if [[ "$HOST_ARCH" != "x86_64" ]]; then
+      bitcoind_name="bitcoind${binary_suffix}-${HOST_ARCH}"
+      bitcoin_cli_name="bitcoin-cli${binary_suffix}-${HOST_ARCH}"
+    fi
+    
+    if container_cmd cp "$CONTAINER_NAME:/usr/local/bin/bitcoind" "$export_dir/${bitcoind_name}" 2>/dev/null && \
+       container_cmd cp "$CONTAINER_NAME:/usr/local/bin/bitcoin-cli" "$export_dir/${bitcoin_cli_name}" 2>/dev/null; then
       
       # Fix ownership (container cp may create root-owned files)
-      sudo chown "$USER:$USER" "$export_dir/bitcoind${binary_suffix}" 2>/dev/null || true
-      sudo chown "$USER:$USER" "$export_dir/bitcoin-cli${binary_suffix}" 2>/dev/null || true
+      sudo chown "$USER:$USER" "$export_dir/${bitcoind_name}" 2>/dev/null || true
+      sudo chown "$USER:$USER" "$export_dir/${bitcoin_cli_name}" 2>/dev/null || true
       
       # Generate checksums for binaries
-      (cd "$export_dir" && sha256sum "bitcoind${binary_suffix}" "bitcoin-cli${binary_suffix}" >> SHA256SUMS.binaries)
-      echo "    ✓ Binaries exported as: bitcoind${binary_suffix}, bitcoin-cli${binary_suffix}"
+      (cd "$export_dir" && sha256sum "${bitcoind_name}" "${bitcoin_cli_name}" >> SHA256SUMS.binaries)
+      echo "    ✓ Binaries exported as: ${bitcoind_name}, ${bitcoin_cli_name}"
       echo "    ✓ Binary checksums saved to SHA256SUMS.binaries"
     else
       echo "    ⚠️  Warning: Failed to extract binaries from container"
@@ -8666,6 +8839,7 @@ Export Information
 
 Export Date: $(date -u +%Y-%m-%dT%H:%M:%SZ)
 Export Timestamp: $export_timestamp
+Architecture: $HOST_ARCH
 Format: Modular (container image + blockchain parts)
 
 Container Specifications:
@@ -8703,7 +8877,11 @@ METADATA
   
   echo ""
   echo "[3/3] Creating container image archive..."
+  # Only add architecture suffix for non-x86_64 platforms (backwards compatibility)
   local image_archive_name="container-image.tar.gz"
+  if [[ "$HOST_ARCH" != "x86_64" ]]; then
+    image_archive_name="container-image-${HOST_ARCH}.tar.gz"
+  fi
   local image_archive_path="$export_dir/${image_archive_name}"
   
   # Archive the temporary directory contents
@@ -8885,11 +9063,21 @@ import_base_container(){
     extract_dir="$item_path"
     
     # Find the image archive within the folder
-    local image_archive=$(ls "$extract_dir"/container-image.tar.gz 2>/dev/null | head -n1)
+    # On ARM64: prefer -aarch64 suffix, fall back to generic
+    # On x86_64: use generic name (no suffix)
+    local image_archive=""
+    if [[ "$HOST_ARCH" == "aarch64" ]]; then
+      image_archive=$(ls "$extract_dir"/container-image-aarch64.tar.gz 2>/dev/null | head -n1)
+    fi
+    
+    if [[ -z "$image_archive" ]]; then
+      # Fallback to generic name (works for x86_64 and old exports)
+      image_archive=$(ls "$extract_dir"/container-image.tar.gz 2>/dev/null | head -n1)
+    fi
     
     if [[ -z "$image_archive" ]]; then
       # Check if folder has VM image instead
-      if ls "$extract_dir"/vm-image.tar.gz >/dev/null 2>&1; then
+      if ls "$extract_dir"/vm-image*.tar.gz >/dev/null 2>&1; then
         pause "❌ This folder only contains a VM image.\n\nTo import as a VM:\n1. Cancel and return to main menu\n2. Choose 'Create Base VM'\n3. Select 'Import from file'\n4. Choose this same folder\n\nOr download/export a container image for this release."
         return
       else
@@ -8930,6 +9118,55 @@ import_base_container(){
   fi
   echo "    ✓ Image loaded"
   
+  # Check architecture compatibility
+  echo ""
+  echo "Checking architecture compatibility..."
+  local export_arch="unknown"
+  
+  # Try to read architecture from METADATA.txt
+  if [[ -f "$extract_dir/METADATA.txt" ]]; then
+    export_arch=$(grep "^Architecture:" "$extract_dir/METADATA.txt" 2>/dev/null | cut -d' ' -f2 | tr -d '\r\n')
+  fi
+  
+  # If not found, try MANIFEST.txt
+  if [[ -z "$export_arch" || "$export_arch" == "unknown" ]]; then
+    if [[ -f "$extract_dir/MANIFEST.txt" ]]; then
+      export_arch=$(grep "^Architecture:" "$extract_dir/MANIFEST.txt" 2>/dev/null | cut -d' ' -f2 | tr -d '\r\n')
+    fi
+  fi
+  
+  # If still not found, try to infer from folder name (gm-export-ARCH-TIMESTAMP)
+  if [[ -z "$export_arch" || "$export_arch" == "unknown" ]]; then
+    local folder_basename=$(basename "$extract_dir")
+    if [[ "$folder_basename" =~ gm-export-(x86_64|aarch64)- ]]; then
+      export_arch="${BASH_REMATCH[1]}"
+    fi
+  fi
+  
+  if [[ -n "$export_arch" && "$export_arch" != "unknown" ]]; then
+    echo "  Export architecture: $export_arch"
+    echo "  Host architecture: $HOST_ARCH"
+    
+    if [[ "$export_arch" != "$HOST_ARCH" ]]; then
+      echo ""
+      echo "⚠️  WARNING: Architecture mismatch detected!"
+      echo ""
+      if ! whiptail --title "Architecture Mismatch" --yesno \
+        "⚠️  ARCHITECTURE MISMATCH DETECTED!\n\nExport Architecture: $export_arch\nHost Architecture: $HOST_ARCH\n\nThe exported container was built for a different architecture.\nIt will NOT work on this system.\n\nYou need to:\n• Export from a $HOST_ARCH system, OR\n• Import this $export_arch export on a $export_arch system\n\nDo you want to cancel the import?" \
+        20 78; then
+        echo "Import cancelled by user."
+        return
+      else
+        echo "⚠️  Proceeding with import despite architecture mismatch (will likely fail)"
+      fi
+    else
+      echo "  ✅ Architecture matches host"
+    fi
+  else
+    echo "  ⚠️  Warning: Could not determine export architecture"
+    echo "     (This may be an older export without architecture metadata)"
+  fi
+  
   # Check for binary files and let user select node type
   echo ""
   echo "Checking available node implementations..."
@@ -8939,14 +9176,24 @@ import_base_container(){
   local node_choice
   local binary_suffix
   
-  if [[ -f "$extract_dir/bitcoind-gm" ]] && [[ -f "$extract_dir/bitcoin-cli-gm" ]]; then
+  # Check for Garbageman binaries
+  # On ARM64: prefer -aarch64 suffix, fall back to generic
+  # On x86_64: use generic names (no suffix)
+  if [[ "$HOST_ARCH" == "aarch64" ]] && [[ -f "$extract_dir/bitcoind-gm-aarch64" ]] && [[ -f "$extract_dir/bitcoin-cli-gm-aarch64" ]]; then
     has_gm=true
-    echo "  ✓ Found Garbageman binaries"
+    echo "  ✓ Found Garbageman binaries (bitcoind-gm-aarch64, bitcoin-cli-gm-aarch64)"
+  elif [[ -f "$extract_dir/bitcoind-gm" ]] && [[ -f "$extract_dir/bitcoin-cli-gm" ]]; then
+    has_gm=true
+    echo "  ✓ Found Garbageman binaries (bitcoind-gm, bitcoin-cli-gm)"
   fi
   
-  if [[ -f "$extract_dir/bitcoind-knots" ]] && [[ -f "$extract_dir/bitcoin-cli-knots" ]]; then
+  # Check for Bitcoin Knots binaries
+  if [[ "$HOST_ARCH" == "aarch64" ]] && [[ -f "$extract_dir/bitcoind-knots-aarch64" ]] && [[ -f "$extract_dir/bitcoin-cli-knots-aarch64" ]]; then
     has_knots=true
-    echo "  ✓ Found Bitcoin Knots binaries"
+    echo "  ✓ Found Bitcoin Knots binaries (bitcoind-knots-aarch64, bitcoin-cli-knots-aarch64)"
+  elif [[ -f "$extract_dir/bitcoind-knots" ]] && [[ -f "$extract_dir/bitcoin-cli-knots" ]]; then
+    has_knots=true
+    echo "  ✓ Found Bitcoin Knots binaries (bitcoind-knots, bitcoin-cli-knots)"
   fi
   
   if [[ "$has_gm" == "false" ]] && [[ "$has_knots" == "false" ]]; then
@@ -9071,8 +9318,20 @@ import_base_container(){
   echo ""
   echo "[4b/5] Injecting node binaries into container..."
   
+  # On ARM64: prefer -aarch64 suffix, fall back to generic
+  # On x86_64: use generic names (no suffix)
   local bitcoind_file="$extract_dir/bitcoind${binary_suffix}"
   local bitcoin_cli_file="$extract_dir/bitcoin-cli${binary_suffix}"
+  
+  if [[ "$HOST_ARCH" == "aarch64" ]]; then
+    # Try aarch64-specific first
+    if [[ -f "$extract_dir/bitcoind${binary_suffix}-aarch64" ]]; then
+      bitcoind_file="$extract_dir/bitcoind${binary_suffix}-aarch64"
+    fi
+    if [[ -f "$extract_dir/bitcoin-cli${binary_suffix}-aarch64" ]]; then
+      bitcoin_cli_file="$extract_dir/bitcoin-cli${binary_suffix}-aarch64"
+    fi
+  fi
   
   # Copy binaries into the container
   if ! container_cmd cp "$bitcoind_file" "${CONTAINER_NAME}:/usr/local/bin/bitcoind"; then
@@ -9198,11 +9457,16 @@ torcontrol=127.0.0.1:9051
 
 # import_from_github_container: Import container from GitHub release (NEW MODULAR FORMAT)
 # Purpose: Download and import pre-built container using modular architecture
+# NOTE: When publishing releases, ensure architecture-specific exports are used:
+#       - x86_64: gm-export-x86_64-YYYYMMDD-HHMMSS
+#       - aarch64: gm-export-aarch64-YYYYMMDD-HHMMSS
+#       The script will validate architecture compatibility during import.
 # Modular Design:
 #   - Downloads blockchain data separately from images
 #   - Downloads BOTH images (container + VM) for flexibility/switching later
 #   - Downloads node binaries (Garbageman and/or Bitcoin Knots)
 #   - Verifies checksums (unified SHA256SUMS when available)
+#   - Verifies architecture compatibility with host system
 #   - Reassembles blockchain from split parts
 #   - Uses container image for import; keeps VM image for later use
 # Flow:
@@ -9351,22 +9615,36 @@ import_from_github_container(){
     # Unified checksum file
     elif [[ "$name" == "SHA256SUMS" ]]; then
       sha256sums_url="$url"
-    # Container image (container-image.tar.gz)
-    elif [[ "$name" == "container-image.tar.gz" ]]; then
+    # Container image (ARM64: prefer -aarch64 suffix, x86_64: generic name)
+    elif [[ "$HOST_ARCH" == "aarch64" && "$name" == "container-image-aarch64.tar.gz" ]]; then
       container_image_name="$name"
       container_image_url="$url"
-    # VM image (vm-image.tar.gz)
-    elif [[ "$name" == "vm-image.tar.gz" ]]; then
+    elif [[ "$name" == "container-image.tar.gz" && -z "$container_image_url" ]]; then
+      container_image_name="$name"
+      container_image_url="$url"
+    # VM image (ARM64: prefer -aarch64 suffix, x86_64: generic name)
+    elif [[ "$HOST_ARCH" == "aarch64" && "$name" == "vm-image-aarch64.tar.gz" ]]; then
       vm_image_name="$name"
       vm_image_url="$url"
-    # Bitcoin binaries
-    elif [[ "$name" == "bitcoind-gm" ]]; then
+    elif [[ "$name" == "vm-image.tar.gz" && -z "$vm_image_url" ]]; then
+      vm_image_name="$name"
+      vm_image_url="$url"
+    # Bitcoin binaries (ARM64: prefer -aarch64 suffix, x86_64: generic names)
+    elif [[ "$HOST_ARCH" == "aarch64" && "$name" == "bitcoind-gm-aarch64" ]]; then
       bitcoind_gm_url="$url"
-    elif [[ "$name" == "bitcoin-cli-gm" ]]; then
+    elif [[ "$name" == "bitcoind-gm" && -z "$bitcoind_gm_url" ]]; then
+      bitcoind_gm_url="$url"
+    elif [[ "$HOST_ARCH" == "aarch64" && "$name" == "bitcoin-cli-gm-aarch64" ]]; then
       bitcoin_cli_gm_url="$url"
-    elif [[ "$name" == "bitcoind-knots" ]]; then
+    elif [[ "$name" == "bitcoin-cli-gm" && -z "$bitcoin_cli_gm_url" ]]; then
+      bitcoin_cli_gm_url="$url"
+    elif [[ "$HOST_ARCH" == "aarch64" && "$name" == "bitcoind-knots-aarch64" ]]; then
       bitcoind_knots_url="$url"
-    elif [[ "$name" == "bitcoin-cli-knots" ]]; then
+    elif [[ "$name" == "bitcoind-knots" && -z "$bitcoind_knots_url" ]]; then
+      bitcoind_knots_url="$url"
+    elif [[ "$HOST_ARCH" == "aarch64" && "$name" == "bitcoin-cli-knots-aarch64" ]]; then
+      bitcoin_cli_knots_url="$url"
+    elif [[ "$name" == "bitcoin-cli-knots" && -z "$bitcoin_cli_knots_url" ]]; then
       bitcoin_cli_knots_url="$url"
     fi
   done < <(echo "$release_assets" | jq -r '.[] | "\(.name)|\(.browser_download_url)"')
