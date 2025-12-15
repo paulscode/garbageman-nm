@@ -152,7 +152,7 @@ fastify.log.info('Tor peer discovery service started');
 fastify.get('/', async (request, reply) => {
   reply.send({
     service: 'garbageman-webui-api',
-    version: '0.2.1',
+    version: '0.2.2',
     endpoints: {
       health: 'GET /api/health',
       instances: {
