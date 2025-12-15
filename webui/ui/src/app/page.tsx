@@ -8,7 +8,7 @@
 'use client';
 
 import { API_BASE_URL } from '@/lib/api-config';
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { CommandBar } from '@/components/CommandBar';
 import { StatusBoard } from '@/components/StatusBoard';
 import { NodeCard } from '@/components/NodeCard';
@@ -116,7 +116,7 @@ export default function HomePage() {
   }>>([]);
   
   // Helper function to make authenticated API requests
-  const authenticatedFetch = async (url: string, options: RequestInit = {}) => {
+  const authenticatedFetch = useCallback(async (url: string, options: RequestInit = {}) => {
     const token = sessionStorage.getItem('auth_token');
     
     if (!token) {
@@ -141,7 +141,7 @@ export default function HomePage() {
     }
     
     return response;
-  };
+  }, []); // Empty deps - function doesn't depend on any props/state, reads from sessionStorage directly
   
   // Check for existing session on mount
   useEffect(() => {
@@ -280,7 +280,7 @@ export default function HomePage() {
     };
     
     loadArtifacts();
-  }, [isLocked, requiresPasswordChange]);
+  }, [isLocked, requiresPasswordChange, authenticatedFetch]);
   
   // Handlers for instance actions
   const handleStart = async (id: string) => {
