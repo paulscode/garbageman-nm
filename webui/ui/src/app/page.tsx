@@ -419,7 +419,7 @@ export default function HomePage() {
           // Version will be queried from running daemon and saved
           network: data.network,
           ipv4Enabled: data.enableClearnet || false,
-          useBlockchainSnapshot: data.useBlockchainSnapshot !== false, // default to true
+          useBlockchainSnapshot: data.useBlockchainSnapshot === true, // only true if explicitly set
           rpcPort: data.rpcPort,
           p2pPort: data.p2pPort,
           zmqPort: data.zmqPort,

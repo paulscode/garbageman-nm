@@ -47,6 +47,17 @@ interface GitHubRelease {
   totalSizeGB: number;
 }
 
+interface SystemInfo {
+  architecture: string;
+  displayName: string;
+  expectedBinaryNames: {
+    bitcoindGm: string[];
+    bitcoinCliGm: string[];
+    bitcoindKnots: string[];
+    bitcoinCliKnots: string[];
+  };
+}
+
 export function ImportArtifactModal({ isOpen, onClose, onSubmit, authenticatedFetch }: ImportArtifactModalProps) {
   const [method, setMethod] = useState<'upload' | 'github'>('github');
   const [selectedRelease, setSelectedRelease] = useState<string>('');
@@ -56,6 +67,21 @@ export function ImportArtifactModal({ isOpen, onClose, onSubmit, authenticatedFe
   const [releases, setReleases] = useState<GitHubRelease[]>([]);
   const [loadingReleases, setLoadingReleases] = useState(false);
   const [includeBlockchain, setIncludeBlockchain] = useState(false);
+  const [systemInfo, setSystemInfo] = useState<SystemInfo | null>(null);
+
+  // Fetch system architecture info when modal opens
+  useEffect(() => {
+    if (isOpen && !systemInfo) {
+      authenticatedFetch(`${API_BASE_URL}/api/artifacts/system-info`)
+        .then(res => res.json())
+        .then(data => {
+          setSystemInfo(data);
+        })
+        .catch(err => {
+          console.error('Failed to fetch system info:', err);
+        });
+    }
+  }, [isOpen, systemInfo, authenticatedFetch]);
 
   // Fetch GitHub releases when modal opens
   useEffect(() => {
@@ -169,9 +195,16 @@ export function ImportArtifactModal({ isOpen, onClose, onSubmit, authenticatedFe
             {/* Header */}
             <div className="border-b border-subtle p-6">
               <div className="flex items-center justify-between">
-                <h2 className="text-2xl font-bold font-mono text-tx0 glow-1">
-                  📦 IMPORT ARTIFACT
-                </h2>
+                <div>
+                  <h2 className="text-2xl font-bold font-mono text-tx0 glow-1">
+                    📦 IMPORT ARTIFACT
+                  </h2>
+                  {systemInfo && (
+                    <div className="text-xs text-tx3 font-mono mt-1">
+                      System: {systemInfo.displayName}
+                    </div>
+                  )}
+                </div>
                 <button
                   onClick={onClose}
                   className="text-tx3 hover:text-tx0 transition-colors text-2xl font-mono"

@@ -28,6 +28,14 @@ import path from 'path';
 import { spawn } from 'child_process';
 
 import { logArtifactImported, logArtifactDeleted } from '../lib/events.js';
+import { 
+  getSystemArchitecture, 
+  detectBinaryArchitecture,
+  getExpectedBinaryNames,
+  isArchitectureCompatible,
+  normalizeBinaryFilename,
+  type Architecture
+} from '../lib/architecture.js';
 
 const GITHUB_REPO = 'paulscode/garbageman-nm';
 const GITHUB_API_URL = `https://api.github.com/repos/${GITHUB_REPO}/releases`;
@@ -78,6 +86,8 @@ interface LocalArtifact {
   hasKnots: boolean;
   hasContainer: boolean;
   hasBlockchain?: boolean;
+  architecture?: Architecture;
+  architectureCompatible?: boolean; // True if matches system architecture
   path: string;
 }
 
@@ -128,12 +138,17 @@ export default async function artifactsRoute(fastify: FastifyInstance) {
       // Read metadata.json from each tag directory
       const artifacts: LocalArtifact[] = [];
       
+      const systemArch = getSystemArchitecture();
+      
       for (const tagDir of tagDirs) {
         const metadataPath = path.join(artifactsDir, tagDir.name, 'metadata.json');
         
         try {
           const metadataContent = await fs.readFile(metadataPath, 'utf-8');
           const metadata = JSON.parse(metadataContent);
+          
+          const artifactArch = metadata.architecture || 'unknown';
+          const compatible = isArchitectureCompatible(artifactArch, systemArch);
           
           artifacts.push({
             tag: metadata.tag,
@@ -142,6 +157,8 @@ export default async function artifactsRoute(fastify: FastifyInstance) {
             hasKnots: metadata.hasKnots || false,
             hasContainer: metadata.hasContainer || false,
             hasBlockchain: metadata.hasBlockchain || false,
+            architecture: artifactArch,
+            architectureCompatible: compatible,
             path: path.join(artifactsDir, tagDir.name),
           });
         } catch (error) {
@@ -163,6 +180,23 @@ export default async function artifactsRoute(fastify: FastifyInstance) {
         message: error instanceof Error ? error.message : 'Unknown error',
       });
     }
+  });
+  
+  // --------------------------------------------------------------------------
+  // GET /api/artifacts/system-info - Get system architecture info
+  // --------------------------------------------------------------------------
+  
+  fastify.get('/api/artifacts/system-info', async (request, reply) => {
+    const systemArch = getSystemArchitecture();
+    const expectedNames = getExpectedBinaryNames(systemArch);
+    
+    reply.send({
+      architecture: systemArch,
+      displayName: systemArch === 'x86_64' ? 'x86_64 (Intel/AMD 64-bit)' : 
+                   systemArch === 'aarch64' ? 'aarch64 (ARM 64-bit)' : 
+                   'Unknown',
+      expectedBinaryNames: expectedNames,
+    });
   });
   
   // --------------------------------------------------------------------------
@@ -207,15 +241,19 @@ export default async function artifactsRoute(fastify: FastifyInstance) {
       
       const releases: GitHubRelease[] = await response.json() as GitHubRelease[];
       
+      // Get system architecture for filtering
+      const systemArch = getSystemArchitecture();
+      const expectedNames = getExpectedBinaryNames(systemArch);
+      
       // Parse each release to determine what's available
       const releaseInfos: ReleaseInfo[] = releases.map(release => {
         const assets = release.assets;
         
-        // Check for binaries
-        const hasGarbageman = assets.some(a => a.name === 'bitcoind-gm') &&
-                              assets.some(a => a.name === 'bitcoin-cli-gm');
-        const hasKnots = assets.some(a => a.name === 'bitcoind-knots') &&
-                         assets.some(a => a.name === 'bitcoin-cli-knots');
+        // Check for binaries matching our architecture
+        const hasGarbageman = assets.some(a => expectedNames.bitcoindGm.includes(a.name)) &&
+                              assets.some(a => expectedNames.bitcoinCliGm.includes(a.name));
+        const hasKnots = assets.some(a => expectedNames.bitcoindKnots.includes(a.name)) &&
+                         assets.some(a => expectedNames.bitcoinCliKnots.includes(a.name));
         
         // Count blockchain parts
         const blockchainParts = assets.filter(a => 
@@ -416,15 +454,30 @@ export default async function artifactsRoute(fastify: FastifyInstance) {
     try {
       const fs = await import('fs/promises');
       
-      // Parse assets
+      // Get system architecture and expected binary names
+      const systemArch = getSystemArchitecture();
+      const expectedNames = getExpectedBinaryNames(systemArch);
+      
+      fastify.log.info(`Importing artifacts for architecture: ${systemArch}`);
+      
+      // Parse assets - look for architecture-specific binaries
       const assets = release.assets;
-      const bitcoindGm = assets.find(a => a.name === 'bitcoind-gm');
-      const bitcoinCliGm = assets.find(a => a.name === 'bitcoin-cli-gm');
-      const bitcoindKnots = assets.find(a => a.name === 'bitcoind-knots');
-      const bitcoinCliKnots = assets.find(a => a.name === 'bitcoin-cli-knots');
+      
+      // Find binaries matching our architecture
+      const bitcoindGm = assets.find(a => expectedNames.bitcoindGm.includes(a.name));
+      const bitcoinCliGm = assets.find(a => expectedNames.bitcoinCliGm.includes(a.name));
+      const bitcoindKnots = assets.find(a => expectedNames.bitcoindKnots.includes(a.name));
+      const bitcoinCliKnots = assets.find(a => expectedNames.bitcoinCliKnots.includes(a.name));
+      
       const containerImage = assets.find(a => a.name === 'container-image.tar.gz');
       const sha256sums = assets.find(a => a.name === 'SHA256SUMS');
       const manifest = assets.find(a => a.name === 'MANIFEST.txt');
+      
+      // Log what we found
+      if (bitcoindGm) fastify.log.info(`Found Garbageman bitcoind: ${bitcoindGm.name}`);
+      if (bitcoinCliGm) fastify.log.info(`Found Garbageman bitcoin-cli: ${bitcoinCliGm.name}`);
+      if (bitcoindKnots) fastify.log.info(`Found Knots bitcoind: ${bitcoindKnots.name}`);
+      if (bitcoinCliKnots) fastify.log.info(`Found Knots bitcoin-cli: ${bitcoinCliKnots.name}`);
       
       // Create artifact directory
       await fs.mkdir(artifactPath, { recursive: true });
@@ -442,11 +495,24 @@ export default async function artifactsRoute(fastify: FastifyInstance) {
         if (sha256sums) downloads.push({ name: 'SHA256SUMS', url: sha256sums.browser_download_url });
         if (manifest) downloads.push({ name: 'MANIFEST.txt', url: manifest.browser_download_url });
         
-        // Download binaries
-        if (bitcoindGm) downloads.push({ name: 'bitcoind-gm', url: bitcoindGm.browser_download_url });
-        if (bitcoinCliGm) downloads.push({ name: 'bitcoin-cli-gm', url: bitcoinCliGm.browser_download_url });
-        if (bitcoindKnots) downloads.push({ name: 'bitcoind-knots', url: bitcoindKnots.browser_download_url });
-        if (bitcoinCliKnots) downloads.push({ name: 'bitcoin-cli-knots', url: bitcoinCliKnots.browser_download_url });
+        // Download binaries - normalize names to remove architecture suffixes
+        // This ensures consistent naming in the artifacts directory
+        if (bitcoindGm) downloads.push({ 
+          name: normalizeBinaryFilename(bitcoindGm.name), 
+          url: bitcoindGm.browser_download_url 
+        });
+        if (bitcoinCliGm) downloads.push({ 
+          name: normalizeBinaryFilename(bitcoinCliGm.name), 
+          url: bitcoinCliGm.browser_download_url 
+        });
+        if (bitcoindKnots) downloads.push({ 
+          name: normalizeBinaryFilename(bitcoindKnots.name), 
+          url: bitcoindKnots.browser_download_url 
+        });
+        if (bitcoinCliKnots) downloads.push({ 
+          name: normalizeBinaryFilename(bitcoinCliKnots.name), 
+          url: bitcoinCliKnots.browser_download_url 
+        });
         
         // Download container image
         if (containerImage) downloads.push({ name: 'container-image.tar.gz', url: containerImage.browser_download_url });
@@ -570,6 +636,7 @@ export default async function artifactsRoute(fastify: FastifyInstance) {
       } : {
         tag,
         importedAt: new Date().toISOString(),
+        architecture: systemArch,
         hasGarbageman: !!(bitcoindGm && bitcoinCliGm),
         hasKnots: !!(bitcoindKnots && bitcoinCliKnots),
         hasContainer: !!containerImage,
@@ -1034,10 +1101,33 @@ export default async function artifactsRoute(fastify: FastifyInstance) {
         }
       }
       
+      // Detect architecture from binaries (if present)
+      let detectedArch: Architecture = 'unknown';
+      const binaryFiles = files.filter(f => f.startsWith('bitcoind') || f.startsWith('bitcoin-cli'));
+      if (binaryFiles.length > 0) {
+        // Check if any binary has architecture suffix
+        for (const binary of binaryFiles) {
+          const arch = detectBinaryArchitecture(binary);
+          if (arch !== 'x86_64') { // If we find a non-default arch, use it
+            detectedArch = arch;
+            break;
+          }
+          detectedArch = arch; // Otherwise use the last detected arch
+        }
+      }
+      
+      // Fallback to system architecture if we couldn't detect from filename
+      if (detectedArch === 'unknown') {
+        detectedArch = getSystemArchitecture();
+      }
+      
+      fastify.log.info(`Detected architecture for uploaded artifact: ${detectedArch}`);
+      
       // Generate metadata matching GitHub import format
       const metadata = {
         tag,
         importedAt: new Date().toISOString(),
+        architecture: detectedArch,
         hasGarbageman: hasGarbagemanBinaries,
         hasKnots: hasKnotsBinaries,
         hasContainer: hasContainerImage,

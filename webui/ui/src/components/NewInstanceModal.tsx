@@ -63,7 +63,7 @@ export function NewInstanceModal({ isOpen, onClose, onSubmit, artifacts, onImpor
         artifactImpl: artifacts[0]?.implementations[0] || 'garbageman',
         network: 'mainnet',
         enableClearnet: false,
-        useBlockchainSnapshot: true, // Default to using blockchain snapshot if available
+        useBlockchainSnapshot: artifacts[0]?.hasBlockchain === true, // Only true if artifact has blockchain data
       });
     }
   }, [isOpen, artifacts]);
@@ -164,6 +164,7 @@ export function NewInstanceModal({ isOpen, onClose, onSubmit, artifacts, onImpor
                         ...formData,
                         artifactId: e.target.value,
                         artifactImpl: newArtifact?.implementations[0] || 'garbageman',
+                        useBlockchainSnapshot: newArtifact?.hasBlockchain === true, // Reset based on new artifact
                       });
                     }}
                     className="w-full px-4 py-3 bg-bg2 border border-subtle rounded font-mono text-tx0 focus:border-bright focus:outline-none"

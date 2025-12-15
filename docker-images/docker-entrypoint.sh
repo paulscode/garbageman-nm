@@ -50,6 +50,28 @@ echo "[i] Detected wrapper: $WRAPPER_TYPE"
 echo "[i] Starting Garbageman Nodes Manager..."
 
 # ==============================================================================
+# Architecture Detection
+# ==============================================================================
+
+detect_architecture() {
+    local arch=$(uname -m)
+    case "$arch" in
+        x86_64)
+            echo "x86_64"
+            ;;
+        aarch64|arm64)
+            echo "aarch64"
+            ;;
+        *)
+            echo "unknown"
+            ;;
+    esac
+}
+
+export HOST_ARCH=$(detect_architecture)
+echo "[i] Detected architecture: $HOST_ARCH"
+
+# ==============================================================================
 # Wrapper-Specific Initialization
 # ==============================================================================
 

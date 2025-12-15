@@ -630,7 +630,9 @@ export default async function instancesRoute(fastify: FastifyInstance) {
         };
         
         // Extract blockchain data BEFORE writing config (supervisor will auto-start on config write)
-        const useBlockchain = body.useBlockchainSnapshot !== false; // default to true if not specified
+        const useBlockchain = body.useBlockchainSnapshot === true; // only use if explicitly requested
+        
+        fastify.log.info(`Instance ${instanceId}: useBlockchainSnapshot=${body.useBlockchainSnapshot}, useBlockchain=${useBlockchain}, artifact=${body.artifact}`);
         
         // BLOCKCHAIN EXTRACTION & PRIVACY PROTECTION
         // ===========================================

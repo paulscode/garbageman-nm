@@ -33,6 +33,9 @@ import testDataRoute from './routes/test-data.js';
 // Import services
 import { peerDiscoveryService } from './services/peer-discovery.js';
 
+// Import architecture utilities
+import { getSystemArchitecture, getArchitectureDisplayName } from './lib/architecture.js';
+
 // ============================================================================
 // Configuration
 // ============================================================================
@@ -206,11 +209,15 @@ process.on('SIGINT', shutdown);
 try {
   await fastify.listen({ port: PORT, host: HOST });
   
+  const systemArch = getSystemArchitecture();
+  const archDisplay = getArchitectureDisplayName(systemArch);
+  
   fastify.log.info('============================================================');
   fastify.log.info('Garbageman WebUI API Server - Running');
   fastify.log.info('============================================================');
   fastify.log.info(`Address: http://${HOST}:${PORT}`);
   fastify.log.info(`Environment: ${process.env.NODE_ENV || 'development'}`);
+  fastify.log.info(`Architecture: ${archDisplay}`);
   fastify.log.info(`Log Level: ${LOG_LEVEL}`);
   fastify.log.info('============================================================');
 } catch (err) {

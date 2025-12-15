@@ -10,6 +10,8 @@ interface LocalArtifact {
   hasKnots: boolean;
   hasContainer: boolean;
   hasBlockchain: boolean;
+  architecture?: string;
+  architectureCompatible?: boolean;
   path: string;
 }
 
@@ -120,11 +122,30 @@ export function ArtifactsView({ onClose: _onClose, onArtifactDeleted, authentica
                     Blockchain Data
                   </span>
                 )}
+                {artifact.architecture && (
+                  <span className={`px-2 py-1 text-xs font-mono rounded ${
+                    artifact.architectureCompatible === false
+                      ? 'bg-amber-500/20 border border-amber-500 text-amber-500'
+                      : 'bg-tx3/20 border border-tx3 text-tx3'
+                  }`}>
+                    {artifact.architecture === 'x86_64' ? '🖥️ x86_64' : 
+                     artifact.architecture === 'aarch64' ? '🔧 aarch64' : 
+                     '❓ unknown'}
+                    {artifact.architectureCompatible === false && ' ⚠️'}
+                  </span>
+                )}
               </div>
               
               <div className="text-xs text-tx3 font-mono">
                 Imported: {new Date(artifact.importedAt).toLocaleString()}
               </div>
+              
+              {artifact.architectureCompatible === false && (
+                <div className="mt-2 text-xs text-amber-500 font-mono flex items-center gap-1">
+                  <span>⚠️</span>
+                  <span>This artifact may not be compatible with your system architecture</span>
+                </div>
+              )}
             </div>
             
             <div className="flex-shrink-0">
