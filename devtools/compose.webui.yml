@@ -131,7 +131,8 @@ services:
     environment:
       PORT: 5173
       HOSTNAME: "0.0.0.0"
-      NEXT_PUBLIC_API_BASE: http://localhost:8080
+      # Don't set NEXT_PUBLIC_API_BASE - let UI use empty string for relative paths
+      # This way browser requests go through Next.js rewrites regardless of hostname
       # Server-side API URL for Next.js rewrites (container-to-container)
       API_BASE_URL: http://webui-api:8080
       NODE_ENV: development

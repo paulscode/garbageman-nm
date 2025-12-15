@@ -7,10 +7,10 @@
  */
 
 export const getApiBaseUrl = (): string => {
-  // In browser, always use relative path (empty string)
-  // This allows Next.js rewrites to proxy to the API server
+  // In browser: check for NEXT_PUBLIC_API_BASE first, otherwise use relative path
+  // Relative path allows Next.js rewrites to proxy regardless of hostname
   if (typeof window !== 'undefined') {
-    return '';
+    return process.env.NEXT_PUBLIC_API_BASE || '';
   }
   
   // Server-side: use environment variable or default
