@@ -88,6 +88,8 @@ services:
       TOR_PROXY_PORT: 9050
       # Host architecture for artifact compatibility checking
       HOST_ARCH: ${HOST_ARCH:-x86_64}
+      # JWT secret for session tokens (persisted across restarts)
+      JWT_SECRET: ${JWT_SECRET:-dev_jwt_secret_change_in_production_12345678901234567890}
     volumes:
       # Mount envfiles directory (read/write)
       - ../envfiles:/envfiles
